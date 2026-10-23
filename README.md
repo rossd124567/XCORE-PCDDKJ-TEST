@@ -5,3 +5,20 @@
 使用：解压后将 app.py 上传 GitHub XCORE-PCDDKJ-TEST 根目录覆盖同名文件并 Commit；其余文件无需改动。Railway 自动部署后打开 /api/prediction。
 
 注意：此修复仅处理期号识别；大小/单双方向读取、动态页面加载及期号同步仍需实际验证。若出现新错误请发送完整响应截图。不要用未经验证的预测进行下注。
+
+
+## V3.2 stability patch
+- Replace unbounded ThreadingHTTPServer with HTTPServer to prevent per-request thread exhaustion.
+- One background worker collects draw, history and predictions.
+- Endpoints return cached JSON immediately, with loading/stale statuses when appropriate.
+- /health reports worker status and cache freshness.
+- Existing Railway environment variables remain unchanged.
+- Deploy and monitor logs. Upstream availability is not guaranteed.
+
+
+## V3.3 issue-aware upstream polling
+- A completed draw + next-issue size/parity prediction pauses upstream checks for 180 seconds (PCDDKJ_SUCCESS_SLEEP_SECONDS).
+- Missing, mismatched or failed data retries every 25 seconds (PCDDKJ_RETRY_SECONDS).
+- Windows API reads use the cached snapshot and never trigger scraping.
+- Health reports next upstream check time. Snapshots older than 420 seconds are marked stale.
+- The 3-minute cadence is approximate; clock alignment and upstream publication delays can occur.

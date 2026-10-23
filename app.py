@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """XCORE PCDDKJ read-only diagnostic API. No betting, no fabricated data."""
-import json,os,re,time,urllib.request,urllib.parse
-from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+import json,os,re,time,urllib.request,urllib.parse,threading,copy
+from http.server import BaseHTTPRequestHandler,HTTPServer
 from html.parser import HTMLParser
 HOME='https://pcddkj.com/'
 HEADERS={'User-Agent':'Mozilla/5.0 (XCORE-PC28-ReadOnly/2.0)','Accept':'application/json,text/html,*/*'}
@@ -167,17 +167,104 @@ def prediction():
  except Exception as e:
   return dict(result,status='error',message=f'{type(e).__name__}: {str(e)[:240]}')
 
+# Only one background worker performs upstream I/O and Chromium rendering.
+# HTTP requests serve cached snapshots immediately; no per-request threads.
+_CACHE_LOCK = threading.Lock()
+_CACHE = {}
+_LAST_ATTEMPT = {}
+# 3-minute issue cadence. After a successful matching prediction, upstream
+# collection pauses for a full issue; failed/incomplete fetches retry slowly.
+_SUCCESS_SLEEP = max(180, int(os.getenv('PCDDKJ_SUCCESS_SLEEP_SECONDS', '180')))
+_RETRY_SLEEP = max(15, int(os.getenv('PCDDKJ_RETRY_SECONDS', '25')))
+_FETCHERS = {
+    '/api/draw': lambda: configured_json('PCDDKJ_DRAW_URL', parse_draw),
+    '/api/history': history,
+    '/api/prediction': prediction,
+    '/probe': probe,
+}
+_STARTED_AT = int(time.time())
+_LAST_COMPLETE_ISSUE = None
+_NEXT_CHECK_AT = 0
+
+def refresh_worker():
+    global _LAST_COMPLETE_ISSUE, _NEXT_CHECK_AT
+    while True:
+        try:
+            draw = _FETCHERS['/api/draw']()
+            with _CACHE_LOCK:
+                _CACHE['/api/draw'] = {'payload': draw, 'cached_at': int(time.time())}
+            pred = _FETCHERS['/api/prediction']() if draw.get('verified') else {
+                'status':'waiting','verified':False,'message':'等待有效开奖数据'}
+            with _CACHE_LOCK:
+                _CACHE['/api/prediction'] = {'payload': pred, 'cached_at': int(time.time())}
+            expected = str(int(draw['data']['latest']['issue'])+1) if draw.get('verified') else None
+            both = pred.get('predictions', {})
+            complete = (pred.get('verified') is True and expected is not None and
+                        all(both.get(k,{}).get('issue') == expected and
+                            both.get(k,{}).get('direction') in allowed
+                            for k,allowed in [('大小',('大','小')),('单双',('单','双'))]))
+            if complete:
+                _LAST_COMPLETE_ISSUE = expected
+                wait = _SUCCESS_SLEEP
+            else:
+                wait = _RETRY_SLEEP
+            _NEXT_CHECK_AT = int(time.time()) + wait
+            time.sleep(wait)
+        except Exception as exc:
+            print(f'upstream worker error: {type(exc).__name__}: {exc}',flush=True)
+            _NEXT_CHECK_AT = int(time.time()) + _RETRY_SLEEP
+            time.sleep(_RETRY_SLEEP)
+
 class Handler(BaseHTTPRequestHandler):
+ def setup(self):
+  super().setup()
+  self.connection.settimeout(5)
  def do_GET(self):
   path=urllib.parse.urlparse(self.path).path
-  if path=='/':payload={'message':'XCORE PCDDKJ diagnostic V3.1','routes':['/health','/probe','/api/draw','/api/history','/api/prediction'],'warning':'read-only; unverified results must not be used for betting'}
-  elif path=='/health':payload={'ok':True,'service':'xcore-pcddkj-diagnostic-v3-1'}
-  elif path=='/probe':payload=probe()
-  elif path=='/api/draw':payload=configured_json('PCDDKJ_DRAW_URL',parse_draw)
-  elif path=='/api/history':payload=history()
-  elif path=='/api/prediction':payload=prediction()
-  else:self.send_error(404);return
+  if path=='/':
+   payload={'message':'XCORE PCDDKJ diagnostic V3.2 stable',
+            'routes':['/health','/probe','/api/draw','/api/history','/api/prediction'],
+            'warning':'read-only; unverified results must not be used for betting'}
+  elif path=='/health':
+   with _CACHE_LOCK:
+    states={key:{'cached_at':value['cached_at'],
+                 'status':value['payload'].get('status')}
+            for key,value in _CACHE.items()}
+   payload={'ok':True,'service':'xcore-pcddkj-diagnostic-v3-2',
+            'uptime_seconds':int(time.time())-_STARTED_AT,
+            'worker_alive':_WORKER.is_alive(),'cache':states,
+            'last_complete_prediction_issue':_LAST_COMPLETE_ISSUE,
+            'next_upstream_check_at':_NEXT_CHECK_AT}
+  elif path in _FETCHERS:
+   with _CACHE_LOCK:
+    entry=copy.deepcopy(_CACHE.get(path))
+   if entry is None:
+    payload={'status':'loading','verified':False,
+             'message':'后台首次采集中，请稍后重试'}
+   else:
+    payload=entry['payload']
+    age=int(time.time())-entry['cached_at']
+    # Reject stale snapshots even when their original status was ok.
+    if age > max(420, _SUCCESS_SLEEP + 180):
+     payload={'status':'stale','verified':False,
+              'message':'后台数据已过期，等待采集恢复',
+              'last_cached_at':entry['cached_at']}
+  else:
+   self.send_error(404);return
   data=json.dumps(payload,ensure_ascii=False,indent=2).encode('utf-8')
-  self.send_response(200);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+  try:
+   self.send_response(200)
+   self.send_header('Content-Type','application/json; charset=utf-8')
+   self.send_header('Cache-Control','no-store')
+   self.send_header('Content-Length',str(len(data)))
+   self.end_headers()
+   self.wfile.write(data)
+  except (BrokenPipeError,ConnectionResetError):
+   pass
+
 if __name__=='__main__':
- port=int(os.getenv('PORT','8080'));print(f'XCORE read-only V3.1 listening on {port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
+ port=int(os.getenv('PORT','8080'))
+ _WORKER=threading.Thread(target=refresh_worker,name='upstream-refresh',daemon=True)
+ _WORKER.start()
+ print(f'XCORE read-only V3.2 stable listening on {port}',flush=True)
+ HTTPServer(('0.0.0.0',port),Handler).serve_forever()

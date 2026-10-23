@@ -53,7 +53,7 @@ def homepage():
  return html,p,status,content_type
 
 def probe():
- out={'service':'XCORE PCDDKJ read-only diagnostic V3','source':HOME,'timestamp':int(time.time()),'status':'unverified','live_draw_connected':False,'prediction_connected':False}
+ out={'service':'XCORE PCDDKJ read-only diagnostic V3.1','source':HOME,'timestamp':int(time.time()),'status':'unverified','live_draw_connected':False,'prediction_connected':False}
  try:
   html,p,status,typ=homepage()
   out.update(status='homepage_reachable',http_status=status,content_type=typ,html_chars=len(html),scripts=p.scripts[:12],endpoint_name_hints=sorted(set(re.findall(r'[\w./-]*(?:kj|history|stats|feed|miss)\.json',html,re.I)))[:20],prediction_selector_hints={x:x in html for x in ('pane-yuce-dx','pane-yuce-ds')})
@@ -150,7 +150,7 @@ def prediction():
       raise ValueError(f'{category}预测表无数据行')
      cells=[v.strip() for v in rows.first.locator('td').all_text_contents()]
      if len(cells)<4:raise ValueError(f'{category}表格不足4列: {cells[:5]}')
-     match=re.search(r'\\d{6,}',cells[0])
+     match=re.search(r'\d{6,}',cells[0])
      if not match:raise ValueError(f'{category}预测期号无效: {cells[0][:30]}')
      issue=match.group()
      direction=cells[3]
@@ -170,8 +170,8 @@ def prediction():
 class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   path=urllib.parse.urlparse(self.path).path
-  if path=='/':payload={'message':'XCORE PCDDKJ diagnostic V3','routes':['/health','/probe','/api/draw','/api/history','/api/prediction'],'warning':'read-only; unverified results must not be used for betting'}
-  elif path=='/health':payload={'ok':True,'service':'xcore-pcddkj-diagnostic-v3'}
+  if path=='/':payload={'message':'XCORE PCDDKJ diagnostic V3.1','routes':['/health','/probe','/api/draw','/api/history','/api/prediction'],'warning':'read-only; unverified results must not be used for betting'}
+  elif path=='/health':payload={'ok':True,'service':'xcore-pcddkj-diagnostic-v3-1'}
   elif path=='/probe':payload=probe()
   elif path=='/api/draw':payload=configured_json('PCDDKJ_DRAW_URL',parse_draw)
   elif path=='/api/history':payload=history()
@@ -180,4 +180,4 @@ class Handler(BaseHTTPRequestHandler):
   data=json.dumps(payload,ensure_ascii=False,indent=2).encode('utf-8')
   self.send_response(200);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
 if __name__=='__main__':
- port=int(os.getenv('PORT','8080'));print(f'XCORE read-only V3 listening on {port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
+ port=int(os.getenv('PORT','8080'));print(f'XCORE read-only V3.1 listening on {port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()

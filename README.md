@@ -1,19 +1,17 @@
-# 玄核 PCDDKJ Railway 数据测试 V2（只读）
+# XCORE PCDDKJ Railway V3（只读预测验证）
+以用户提供的 V2 app.py 为基础；保留 /probe、/api/draw、/api/history。
 
-覆盖原 GitHub 仓库的 `app.py` 即可。保留原 `Procfile`、`requirements.txt`、`railway.json`。
+## 上传
+将 app.py、Dockerfile、requirements.txt、railway.json、Procfile 上传到现有 GitHub 仓库根目录，覆盖同名文件，Commit。Railway 自动部署。Dockerfile 使用 Playwright Chromium 基础镜像，镜像较大，构建可能较久且消耗资源。
 
-部署后访问：
-- `/health` 服务健康状态
-- `/probe` 网站连接、JS 文件和接口名称线索
-- `/api/draw` 最新开奖：默认返回 `unconfigured`，必须先核实完整的 `kj.json` Request URL，再在 Railway Variables 设置 `PCDDKJ_DRAW_URL`
-- `/api/history` 历史开奖：默认返回 `unconfigured`，必须先核实完整的 `history.json` Request URL，再设置 `PCDDKJ_HISTORY_URL`
-- `/api/prediction` 预测页面静态结构诊断；目前返回 `unverified`，**不是已接通预测**
+## 配置
+保留已有环境变量 PCDDKJ_DRAW_URL=https://pcddkj.com/yu28/kj.json?nbr=1
+无需 Telegram API、卡密或新的 Railway 服务。
 
-## 为什么不直接使用 /pc28/stats.json？
-`/probe` 仅发现该路径的字面线索，没有证据表明它是 `kj.json` 或 `history.json` 的真实接口。
+## 测试
+https://xcore-pcddkj-test-production.up.railway.app/api/draw
+https://xcore-pcddkj-test-production.up.railway.app/api/prediction
 
-## 数据安全
-仅允许访问 pcddkj.com 的 HTTPS URL，且做期号、号码、和值、大小单双校验。没有通过验证的数据不会标记为 `verified:true`。本程序不发送 Telegram 消息，不下注。
+/api/prediction 用 Chromium 渲染网站，切换“预测”“大小”“单双”标签，从 #pane-yuce-dx / #pane-yuce-ds 表格第一行第 1 列读取期号、第 4 列读取预测方向。预测期号必须等于最新开奖期号+1；否则 verified=false。真实页面可能变动，此逻辑尚未在 Railway 实测。如果页面行没有加载，会返回 error，不会伪造预测。`verified=true` 只代表字段和期号校验通过，不代表预测正确率或优势。
 
-## 下一步
-在网站 F12 → Network → Fetch/XHR 中，点击 `kj.json` 和 `history.json`，复制 Request URL。不要提供 Cookie、授权头或账号信息。预测接口需要确认实际返回内容后才能继续实现。
+仅供读取/展示，不含下注操作。请勿在实盘中使用未经过实机测试的数据。

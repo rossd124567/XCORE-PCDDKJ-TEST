@@ -53,7 +53,7 @@ def homepage():
  return html,p,status,content_type
 
 def probe():
- out={'service':'XCORE PCDDKJ read-only diagnostic V2','source':HOME,'timestamp':int(time.time()),'status':'unverified','live_draw_connected':False,'prediction_connected':False}
+ out={'service':'XCORE PCDDKJ read-only diagnostic V3','source':HOME,'timestamp':int(time.time()),'status':'unverified','live_draw_connected':False,'prediction_connected':False}
  try:
   html,p,status,typ=homepage()
   out.update(status='homepage_reachable',http_status=status,content_type=typ,html_chars=len(html),scripts=p.scripts[:12],endpoint_name_hints=sorted(set(re.findall(r'[\w./-]*(?:kj|history|stats|feed|miss)\.json',html,re.I)))[:20],prediction_selector_hints={x:x in html for x in ('pane-yuce-dx','pane-yuce-ds')})
@@ -110,18 +110,68 @@ def history():
  except Exception as e:return {'status':'error','verified':False,'message':f'{type(e).__name__}: {str(e)[:240]}'}
 
 def prediction():
+ """Browser-rendered read-only prediction. Never claim verified on missing or mismatched issue."""
+ result={'status':'unverified','verified':False,'fetched_at':int(time.time()),
+         'source':HOME,'message':'预测未通过期号和方向校验'}
  try:
-  html,p,_,_=homepage()
-  # The page markers are not proof that prediction values are present.
-  tables={t['kind']:t['rows'] for t in p.tables}
-  return {'status':'unverified','verified':False,'fetched_at':int(time.time()),'selector_hints':{k:k in html for k in ('pane-yuce-dx','pane-yuce-ds')},'static_table_preview':tables,'message':'只发现页面标识或静态表格；预测期号、方向和下一期匹配规则尚未核验，不提供可用于下注的预测。'}
- except Exception as e:return {'status':'error','verified':False,'message':f'{type(e).__name__}: {str(e)[:240]}'}
+  from playwright.sync_api import sync_playwright
+ except ImportError:
+  return dict(result,status='error',message='未安装 Playwright；请使用本包 Dockerfile 部署')
+ try:
+  draw=configured_json('PCDDKJ_DRAW_URL',parse_draw)
+  if draw.get('status')!='ok' or not draw.get('verified'):
+   return dict(result,message='最新开奖未通过验证，无法确定预测目标期号',draw_status=draw.get('status'))
+  latest_issue=draw['data']['latest']['issue']
+  expected=str(int(latest_issue)+1)
+  result['latest_draw_issue']=latest_issue
+  result['expected_prediction_issue']=expected
+  found={}
+  with sync_playwright() as pw:
+   browser=pw.chromium.launch(headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
+   try:
+    page=browser.new_page(locale='zh-CN',viewport={'width':1366,'height':900})
+    page.goto(HOME,wait_until='domcontentloaded',timeout=20000)
+    # The website's prediction tabs can be client-rendered.
+    try:
+     page.get_by_text('预测',exact=True).first.click(timeout=3500)
+    except Exception:
+     pass
+    for category,selector,allowed in [('大小','#pane-yuce-dx',('大','小')),('单双','#pane-yuce-ds',('单','双'))]:
+     try:
+      page.get_by_text(category,exact=True).first.click(timeout=2500)
+     except Exception:
+      pass
+     panel=page.locator(selector)
+     panel.wait_for(state='attached',timeout=9000)
+     rows=panel.locator('table tbody tr')
+     try:
+      rows.first.wait_for(state='attached',timeout=9000)
+     except Exception:
+      raise ValueError(f'{category}预测表无数据行')
+     cells=[v.strip() for v in rows.first.locator('td').all_text_contents()]
+     if len(cells)<4:raise ValueError(f'{category}表格不足4列: {cells[:5]}')
+     match=re.search(r'\\d{6,}',cells[0])
+     if not match:raise ValueError(f'{category}预测期号无效: {cells[0][:30]}')
+     issue=match.group()
+     direction=cells[3]
+     if direction not in allowed:raise ValueError(f'{category}预测方向无效: {direction[:30]}')
+     found[category]={'issue':issue,'direction':direction,'source':'PCDDKJ rendered DOM'}
+   finally:
+    browser.close()
+  result['predictions']=found
+  if len(found)!=2:
+   return dict(result,message='未同时取得大小和单双预测')
+  if any(item['issue']!=expected for item in found.values()):
+   return dict(result,message='预测期号与最新开奖的下一期不一致，拒绝验证')
+  return dict(result,status='ok',verified=True,message='网页预测值与目标期号匹配；不代表预测准确性')
+ except Exception as e:
+  return dict(result,status='error',message=f'{type(e).__name__}: {str(e)[:240]}')
 
 class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   path=urllib.parse.urlparse(self.path).path
-  if path=='/':payload={'message':'XCORE PCDDKJ diagnostic V2','routes':['/health','/probe','/api/draw','/api/history','/api/prediction'],'warning':'read-only; unverified results must not be used for betting'}
-  elif path=='/health':payload={'ok':True,'service':'xcore-pcddkj-diagnostic-v2'}
+  if path=='/':payload={'message':'XCORE PCDDKJ diagnostic V3','routes':['/health','/probe','/api/draw','/api/history','/api/prediction'],'warning':'read-only; unverified results must not be used for betting'}
+  elif path=='/health':payload={'ok':True,'service':'xcore-pcddkj-diagnostic-v3'}
   elif path=='/probe':payload=probe()
   elif path=='/api/draw':payload=configured_json('PCDDKJ_DRAW_URL',parse_draw)
   elif path=='/api/history':payload=history()
@@ -130,4 +180,4 @@ class Handler(BaseHTTPRequestHandler):
   data=json.dumps(payload,ensure_ascii=False,indent=2).encode('utf-8')
   self.send_response(200);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
 if __name__=='__main__':
- port=int(os.getenv('PORT','8080'));print(f'XCORE read-only V2 listening on {port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
+ port=int(os.getenv('PORT','8080'));print(f'XCORE read-only V3 listening on {port}',flush=True);ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()

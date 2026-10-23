@@ -22,3 +22,13 @@
 - Windows API reads use the cached snapshot and never trigger scraping.
 - Health reports next upstream check time. Snapshots older than 420 seconds are marked stale.
 - The 3-minute cadence is approximate; clock alignment and upstream publication delays can occur.
+
+
+## V3.4 countdown-based schedule
+- After successful current draw and matching next-issue size/parity prediction, read `data.countdown_raw` from upstream draw JSON.
+- Wait exactly `remaining_seconds + 5` (buffer configurable via `PCDDKJ_COUNTDOWN_BUFFER_SECONDS`). Examples: 30 -> 35; 180 -> 185.
+- Supported countdown formats: integer seconds, `MM:SS`, `HH:MM:SS`. Reject invalid or >180 seconds.
+- If countdown is missing, use 25-second fallback checks instead of guessing a 3-minute deadline.
+- If data is incomplete or failed, retry after `PCDDKJ_RETRY_SECONDS` (default 25).
+- `/health` shows `last_countdown_seconds`, `schedule_reason`, and `next_upstream_check_at`.
+- WARNING: The upstream countdown must refer to the same draw cycle; confirm semantics in production.

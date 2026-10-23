@@ -174,7 +174,8 @@ _CACHE = {}
 _LAST_ATTEMPT = {}
 # 3-minute issue cadence. After a successful matching prediction, upstream
 # collection pauses for a full issue; failed/incomplete fetches retry slowly.
-_SUCCESS_SLEEP = max(180, int(os.getenv('PCDDKJ_SUCCESS_SLEEP_SECONDS', '180')))
+_FALLBACK_SLEEP = max(15, int(os.getenv('PCDDKJ_FALLBACK_SECONDS', '25')))
+_COUNTDOWN_BUFFER = max(0, int(os.getenv('PCDDKJ_COUNTDOWN_BUFFER_SECONDS', '5')))
 _RETRY_SLEEP = max(15, int(os.getenv('PCDDKJ_RETRY_SECONDS', '25')))
 _FETCHERS = {
     '/api/draw': lambda: configured_json('PCDDKJ_DRAW_URL', parse_draw),
@@ -185,9 +186,32 @@ _FETCHERS = {
 _STARTED_AT = int(time.time())
 _LAST_COMPLETE_ISSUE = None
 _NEXT_CHECK_AT = 0
+_SCHEDULE_REASON = 'startup'
+_LAST_COUNTDOWN_SECONDS = None
+
+def countdown_seconds(value):
+    """Parse upstream countdown only; never infer it from local clock."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        seconds = int(value)
+    elif isinstance(value, str):
+        value = value.strip()
+        if re.fullmatch(r'\d+', value):
+            seconds = int(value)
+        elif re.fullmatch(r'\d{1,2}:\d{2}(?::\d{2})?', value):
+            parts = [int(v) for v in value.split(':')]
+            seconds = sum(n * 60 ** i for i, n in enumerate(reversed(parts)))
+        else:
+            return None
+    else:
+        return None
+    # Reject impossible countdowns for a 3-minute issue.
+    return seconds if 0 <= seconds <= 180 else None
+
 
 def refresh_worker():
-    global _LAST_COMPLETE_ISSUE, _NEXT_CHECK_AT
+    global _LAST_COMPLETE_ISSUE, _NEXT_CHECK_AT, _SCHEDULE_REASON, _LAST_COUNTDOWN_SECONDS
     while True:
         try:
             draw = _FETCHERS['/api/draw']()
@@ -203,16 +227,25 @@ def refresh_worker():
                         all(both.get(k,{}).get('issue') == expected and
                             both.get(k,{}).get('direction') in allowed
                             for k,allowed in [('大小',('大','小')),('单双',('单','双'))]))
-            if complete:
+            remaining = countdown_seconds(draw.get('data', {}).get('countdown_raw')) if draw.get('verified') else None
+            _LAST_COUNTDOWN_SECONDS = remaining
+            if complete and remaining is not None:
                 _LAST_COMPLETE_ISSUE = expected
-                wait = _SUCCESS_SLEEP
+                wait = remaining + _COUNTDOWN_BUFFER
+                _SCHEDULE_REASON = 'countdown_plus_buffer'
+            elif complete:
+                _LAST_COMPLETE_ISSUE = expected
+                wait = _FALLBACK_SLEEP
+                _SCHEDULE_REASON = 'missing_or_invalid_countdown'
             else:
                 wait = _RETRY_SLEEP
+                _SCHEDULE_REASON = 'incomplete_or_failed_data'
             _NEXT_CHECK_AT = int(time.time()) + wait
             time.sleep(wait)
         except Exception as exc:
             print(f'upstream worker error: {type(exc).__name__}: {exc}',flush=True)
             _NEXT_CHECK_AT = int(time.time()) + _RETRY_SLEEP
+            _SCHEDULE_REASON = 'worker_exception'
             time.sleep(_RETRY_SLEEP)
 
 class Handler(BaseHTTPRequestHandler):
@@ -222,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   path=urllib.parse.urlparse(self.path).path
   if path=='/':
-   payload={'message':'XCORE PCDDKJ diagnostic V3.2 stable',
+   payload={'message':'XCORE PCDDKJ diagnostic V3.4 countdown scheduled',
             'routes':['/health','/probe','/api/draw','/api/history','/api/prediction'],
             'warning':'read-only; unverified results must not be used for betting'}
   elif path=='/health':
@@ -230,11 +263,13 @@ class Handler(BaseHTTPRequestHandler):
     states={key:{'cached_at':value['cached_at'],
                  'status':value['payload'].get('status')}
             for key,value in _CACHE.items()}
-   payload={'ok':True,'service':'xcore-pcddkj-diagnostic-v3-2',
+   payload={'ok':True,'service':'xcore-pcddkj-diagnostic-v3-4',
             'uptime_seconds':int(time.time())-_STARTED_AT,
             'worker_alive':_WORKER.is_alive(),'cache':states,
             'last_complete_prediction_issue':_LAST_COMPLETE_ISSUE,
-            'next_upstream_check_at':_NEXT_CHECK_AT}
+            'next_upstream_check_at':_NEXT_CHECK_AT,
+            'schedule_reason':_SCHEDULE_REASON,
+            'last_countdown_seconds':_LAST_COUNTDOWN_SECONDS}
   elif path in _FETCHERS:
    with _CACHE_LOCK:
     entry=copy.deepcopy(_CACHE.get(path))
@@ -245,7 +280,7 @@ class Handler(BaseHTTPRequestHandler):
     payload=entry['payload']
     age=int(time.time())-entry['cached_at']
     # Reject stale snapshots even when their original status was ok.
-    if age > max(420, _SUCCESS_SLEEP + 180):
+    if age > 420:
      payload={'status':'stale','verified':False,
               'message':'后台数据已过期，等待采集恢复',
               'last_cached_at':entry['cached_at']}
@@ -266,5 +301,5 @@ if __name__=='__main__':
  port=int(os.getenv('PORT','8080'))
  _WORKER=threading.Thread(target=refresh_worker,name='upstream-refresh',daemon=True)
  _WORKER.start()
- print(f'XCORE read-only V3.2 stable listening on {port}',flush=True)
+ print(f'XCORE read-only V3.4 countdown scheduled listening on {port}',flush=True)
  HTTPServer(('0.0.0.0',port),Handler).serve_forever()

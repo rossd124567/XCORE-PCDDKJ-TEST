@@ -109,7 +109,7 @@ def history():
   return {'status':'ok','verified':True,'fetched_at':int(time.time()),'data':normalized}
  except Exception as e:return {'status':'error','verified':False,'message':f'{type(e).__name__}: {str(e)[:240]}'}
 
-def prediction():
+def prediction(verified_draw=None):
  """Browser-rendered read-only prediction. Never claim verified on missing or mismatched issue."""
  result={'status':'unverified','verified':False,'fetched_at':int(time.time()),
          'source':HOME,'message':'预测未通过期号和方向校验'}
@@ -118,7 +118,7 @@ def prediction():
  except ImportError:
   return dict(result,status='error',message='未安装 Playwright；请使用本包 Dockerfile 部署')
  try:
-  draw=configured_json('PCDDKJ_DRAW_URL',parse_draw)
+  draw=verified_draw if verified_draw is not None else configured_json('PCDDKJ_DRAW_URL',parse_draw)
   if draw.get('status')!='ok' or not draw.get('verified'):
    return dict(result,message='最新开奖未通过验证，无法确定预测目标期号',draw_status=draw.get('status'))
   latest_issue=draw['data']['latest']['issue']
@@ -130,6 +130,8 @@ def prediction():
    browser=pw.chromium.launch(headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
    try:
     page=browser.new_page(locale='zh-CN',viewport={'width':1366,'height':900})
+    page.set_default_timeout(9000)
+    page.set_default_navigation_timeout(20000)
     page.goto(HOME,wait_until='domcontentloaded',timeout=20000)
     # The website's prediction tabs can be client-rendered.
     try:
@@ -188,6 +190,15 @@ _LAST_COMPLETE_ISSUE = None
 _NEXT_CHECK_AT = 0
 _SCHEDULE_REASON = 'startup'
 _LAST_COUNTDOWN_SECONDS = None
+_WORKER_PHASE = 'startup'
+_WORKER_PHASE_AT = int(time.time())
+_LAST_WORKER_ERROR = None
+_LAST_WORKER_COMPLETED_AT = None
+
+def worker_phase(name):
+    global _WORKER_PHASE, _WORKER_PHASE_AT
+    _WORKER_PHASE = name
+    _WORKER_PHASE_AT = int(time.time())
 
 def countdown_seconds(value):
     """Parse upstream countdown only; never infer it from local clock."""
@@ -211,13 +222,15 @@ def countdown_seconds(value):
 
 
 def refresh_worker():
-    global _LAST_COMPLETE_ISSUE, _NEXT_CHECK_AT, _SCHEDULE_REASON, _LAST_COUNTDOWN_SECONDS
+    global _LAST_COMPLETE_ISSUE, _NEXT_CHECK_AT, _SCHEDULE_REASON, _LAST_COUNTDOWN_SECONDS, _LAST_WORKER_ERROR, _LAST_WORKER_COMPLETED_AT
     while True:
         try:
+            worker_phase('fetch_draw')
             draw = _FETCHERS['/api/draw']()
             with _CACHE_LOCK:
                 _CACHE['/api/draw'] = {'payload': draw, 'cached_at': int(time.time())}
-            pred = _FETCHERS['/api/prediction']() if draw.get('verified') else {
+            worker_phase('fetch_prediction')
+            pred = prediction(verified_draw=draw) if draw.get('verified') else {
                 'status':'waiting','verified':False,'message':'等待有效开奖数据'}
             with _CACHE_LOCK:
                 _CACHE['/api/prediction'] = {'payload': pred, 'cached_at': int(time.time())}
@@ -240,12 +253,17 @@ def refresh_worker():
             else:
                 wait = _RETRY_SLEEP
                 _SCHEDULE_REASON = 'incomplete_or_failed_data'
+            _LAST_WORKER_COMPLETED_AT = int(time.time())
+            _LAST_WORKER_ERROR = None
             _NEXT_CHECK_AT = int(time.time()) + wait
+            worker_phase('sleep')
             time.sleep(wait)
         except Exception as exc:
-            print(f'upstream worker error: {type(exc).__name__}: {exc}',flush=True)
+            _LAST_WORKER_ERROR = f'{type(exc).__name__}: {str(exc)[:300]}'
+            print(f'upstream worker error: {_LAST_WORKER_ERROR}',flush=True)
             _NEXT_CHECK_AT = int(time.time()) + _RETRY_SLEEP
             _SCHEDULE_REASON = 'worker_exception'
+            worker_phase('retry_sleep')
             time.sleep(_RETRY_SLEEP)
 
 class Handler(BaseHTTPRequestHandler):
@@ -269,7 +287,12 @@ class Handler(BaseHTTPRequestHandler):
             'last_complete_prediction_issue':_LAST_COMPLETE_ISSUE,
             'next_upstream_check_at':_NEXT_CHECK_AT,
             'schedule_reason':_SCHEDULE_REASON,
-            'last_countdown_seconds':_LAST_COUNTDOWN_SECONDS}
+            'last_countdown_seconds':_LAST_COUNTDOWN_SECONDS,
+            'worker_phase':_WORKER_PHASE,
+            'worker_phase_seconds':int(time.time())-_WORKER_PHASE_AT,
+            'last_worker_completed_at':_LAST_WORKER_COMPLETED_AT,
+            'last_worker_error':_LAST_WORKER_ERROR,
+            'worker_stalled':(_WORKER_PHASE in ('fetch_draw','fetch_prediction') and int(time.time())-_WORKER_PHASE_AT>120)}
   elif path in _FETCHERS:
    with _CACHE_LOCK:
     entry=copy.deepcopy(_CACHE.get(path))

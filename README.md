@@ -1,34 +1,23 @@
-玄核 PCDDKJ Railway V3.1 预测期号修复包
+玄核科技 PC28 开奖数据服务 V3.5（仅开奖/历史）
 
-问题：V3 的正则表达式误写成 r"\\d{6,}"，无法匹配 3497742 等数字期号。V3.1 修复为 r"\d{6,}"。
+本版本已移除预测采集与预测接口，后台只保留只读开奖数据和历史数据，不再访问预测页面，也不会生成或声称提供预测结果。
 
-使用：解压后将 app.py 上传 GitHub XCORE-PCDDKJ-TEST 根目录覆盖同名文件并 Commit；其余文件无需改动。Railway 自动部署后打开 /api/prediction。
+保留路由：
+- `/health`：服务运行状态与缓存状态
+- `/probe`：上游站点连通性诊断
+- `/api/draw`：最新开奖数据
+- `/api/history`：历史开奖数据
 
-注意：此修复仅处理期号识别；大小/单双方向读取、动态页面加载及期号同步仍需实际验证。若出现新错误请发送完整响应截图。不要用未经验证的预测进行下注。
+部署：
+1. 将本目录的 `app.py`、`Dockerfile`、`Procfile`、`railway.json`、`requirements.txt` 上传到 Railway 对应 GitHub 仓库。
+2. 覆盖旧版 `app.py` 并提交，等待 Railway 部署完成。
+3. 检查 `/health`、`/api/draw`、`/api/history` 是否正常。
+4. `/api/prediction` 在本版本中已删除，访问时应返回 404。
 
+轮询：
+- 开奖数据通过校验且有有效倒计时时，按倒计时加缓冲时间轮询。
+- 倒计时缺失时使用备用间隔。
+- 开奖数据未通过校验时按重试间隔重新读取。
+- 请求间隔仍受上游可用性、部署环境和倒计时字段准确性影响。
 
-## V3.2 stability patch
-- Replace unbounded ThreadingHTTPServer with HTTPServer to prevent per-request thread exhaustion.
-- One background worker collects draw, history and predictions.
-- Endpoints return cached JSON immediately, with loading/stale statuses when appropriate.
-- /health reports worker status and cache freshness.
-- Existing Railway environment variables remain unchanged.
-- Deploy and monitor logs. Upstream availability is not guaranteed.
-
-
-## V3.3 issue-aware upstream polling
-- A completed draw + next-issue size/parity prediction pauses upstream checks for 180 seconds (PCDDKJ_SUCCESS_SLEEP_SECONDS).
-- Missing, mismatched or failed data retries every 25 seconds (PCDDKJ_RETRY_SECONDS).
-- Windows API reads use the cached snapshot and never trigger scraping.
-- Health reports next upstream check time. Snapshots older than 420 seconds are marked stale.
-- The 3-minute cadence is approximate; clock alignment and upstream publication delays can occur.
-
-
-## V3.4 countdown-based schedule
-- After successful current draw and matching next-issue size/parity prediction, read `data.countdown_raw` from upstream draw JSON.
-- Wait exactly `remaining_seconds + 5` (buffer configurable via `PCDDKJ_COUNTDOWN_BUFFER_SECONDS`). Examples: 30 -> 35; 180 -> 185.
-- Supported countdown formats: integer seconds, `MM:SS`, `HH:MM:SS`. Reject invalid or >180 seconds.
-- If countdown is missing, use 25-second fallback checks instead of guessing a 3-minute deadline.
-- If data is incomplete or failed, retry after `PCDDKJ_RETRY_SECONDS` (default 25).
-- `/health` shows `last_countdown_seconds`, `schedule_reason`, and `next_upstream_check_at`.
-- WARNING: The upstream countdown must refer to the same draw cycle; confirm semantics in production.
+安全说明：此服务只读取和展示开奖/历史数据，不下注、不生成预测，也不保证上游数据始终可用。

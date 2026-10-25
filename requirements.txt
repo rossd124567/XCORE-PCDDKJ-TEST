@@ -1,1 +1,1 @@
-playwright==1.55.0
+# No third-party packages required; prediction/browser scraping has been removed.\n

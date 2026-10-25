@@ -1,0 +1,25 @@
+玄核科技开奖服务 V3.5 修复说明
+
+问题：V3.4 将开奖采集与 Playwright 预测采集放在同一个循环中；预测浏览器卡住时，开奖无法刷新。
+
+修复：
+1. 开奖采集独立线程，默认每12秒请求一次上游接口，不等待预测。
+2. 预测采集独立线程，浏览器运行于独立子进程，默认45秒超时后强制结束。
+3. 开奖期号连续超过480秒不变时，返回 stale / verified:false，避免把旧数据当作新数据。
+4. /health 增加 prediction_phase、prediction_last_error、last_draw_issue、last_draw_change_at 等诊断字段。
+5. 保持 /api/draw、/api/prediction 既有返回结构和校验规则；不修改卡密后台或Windows客户端。
+
+部署：
+- 先备份 XCORE-PCDDKJ-TEST 原 GitHub main 分支。
+- 上传本目录 app.py 至 XCORE-PCDDKJ-TEST 仓库根目录（保持 Dockerfile/requirements.txt 不变）。
+- Railway 自动部署成功后查看 /health，确认 worker_alive 和 prediction_worker_alive 为 true。
+- 观察 /api/draw 连续至少3期是否正常递增；预测失败时开奖仍应继续更新。
+- 只在真实开奖已核对且软件恢复正常后再考虑开启自动实盘。
+
+可选 Railway 环境变量：
+PCDDKJ_DRAW_INTERVAL_SECONDS=12
+PCDDKJ_PREDICTION_INTERVAL_SECONDS=30
+PCDDKJ_PREDICTION_TIMEOUT_SECONDS=45
+PCDDKJ_DRAW_MAX_UNCHANGED_SECONDS=480
+
+注意：当前环境未能连接公网进行上游实时验证；仅完成语法、启动、健康接口与压缩包检查。请在 Railway 运行验证。
